@@ -1,9 +1,11 @@
-use std::f64::consts::PI;
 use hound;
+use rustfft::{FftPlanner, num_complex::Complex};
+use std::f64::consts::PI;
 
 fn main() {
     const TARGET_SAMPLE_RATE: u32 = 8192;
     const WINDOW_SIZE: usize = 1024;
+    const HOP_SIZE: usize = 64;
 
     println!("Hello, world!");
     let mut reader = hound::WavReader::open("src/media/wav/01_Genesis.wav")
@@ -48,8 +50,51 @@ fn main() {
     println!("First 10 samples: {:?}", &downsampled_samples[0..10]);
 
     let window_coefficients = hamming_window(WINDOW_SIZE);
-    println!("Generated Hamming window {} coefficients", window_coefficients.len());
+    println!(
+        "Generated Hamming window {} coefficients",
+        window_coefficients.len()
+    );
 
+    let mut planner = FftPlanner::new();
+    let fft = planner.plan_fft_forward(WINDOW_SIZE);
+
+    let mut spectrogram: Vec<Vec<f64>> = Vec::new();
+
+    println!("Generating spectrogram...");
+
+    for audio_chunk in downsampled_samples.windows(WINDOW_SIZE).step_by(HOP_SIZE) {
+        let mut complex_buffer: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); WINDOW_SIZE];
+
+        for (i, (sample, coeff)) in audio_chunk
+            .iter()
+            .zip(window_coefficients.iter())
+            .enumerate()
+        {
+            complex_buffer[i] = Complex::new(*sample as f64 * coeff, 0.0);
+        }
+
+        fft.process(&mut complex_buffer);
+
+        let num_freq_bins = WINDOW_SIZE / 2;
+        let mut magnitudes = Vec::with_capacity(num_freq_bins);
+
+        for i in 0..num_freq_bins {
+            let magnitude = complex_buffer[i].norm_sqr();
+            magnitudes.push(magnitude);
+        }
+
+        spectrogram.push(magnitudes);
+    }
+
+    println!(
+        "Spectrogram generated: {} time slices, {} frequency bins",
+        spectrogram.len(),
+        if spectrogram.is_empty() {
+            0
+        } else {
+            spectrogram[0].len()
+        }
+    );
 }
 
 fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
