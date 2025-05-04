@@ -1,4 +1,5 @@
 use hound;
+use image;
 use rustfft::{FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
@@ -6,6 +7,7 @@ fn main() {
     const TARGET_SAMPLE_RATE: u32 = 8192;
     const WINDOW_SIZE: usize = 1024;
     const HOP_SIZE: usize = 64;
+    const FREQ_BANDS: &[usize] = &[5, 80, 160, 320, 640, 1280, 4096]; // Frequency bands in Hz
 
     println!("Hello, world!");
     let mut reader = hound::WavReader::open("src/media/wav/01_Genesis.wav")
@@ -27,10 +29,6 @@ fn main() {
 
     println!("Number of samples read: {}", samples_vec.len());
     println!("First 10 samples: {:?}", &samples_vec[0..10]);
-
-    if samples_vec.len() != reader.len() as usize {
-        panic!("Number of samples read does not match the total number of samples");
-    }
 
     if spec.channels == 2 {
         println!("This is a stereo file");
@@ -95,6 +93,27 @@ fn main() {
             spectrogram[0].len()
         }
     );
+
+    // Save the spectrogram as an image
+    /* let output_path = "src/media/spectrogram.png";
+    spectrogram_to_image(&spectrogram, output_path); */
+
+    let bin_ranges: Vec<(usize, usize)> = FREQ_BANDS
+        .windows(2)
+        .map(|pair| {
+            let low_bin = hz_to_bin(pair[0], TARGET_SAMPLE_RATE, WINDOW_SIZE);
+            let high_bin = hz_to_bin(pair[1], TARGET_SAMPLE_RATE, WINDOW_SIZE);
+            if high_bin <= low_bin {
+                panic!(
+                    "High bin is less than or equal to low bin for frequency band: {:?}",
+                    pair
+                );
+            }
+            (low_bin, high_bin)
+        })
+        .collect();
+
+    println!("Frequency bands converted to bin ranges: {:?}", bin_ranges);
 }
 
 fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
@@ -131,4 +150,61 @@ fn hamming_window(window_len: usize) -> Vec<f64> {
         window.push(0.54 - 0.46 * value.cos());
     }
     window
+}
+
+fn hz_to_bin(hz: usize, sample_rate: u32, window_size: usize) -> usize {
+    let freq_res = sample_rate as f64 / window_size as f64;
+    (hz as f64 / freq_res).round() as usize
+}
+
+fn spectrogram_to_image(spectrogram: &Vec<Vec<f64>>, output_path: &str) {
+    if spectrogram.is_empty() || spectrogram[0].is_empty() {
+        eprintln!("Spectrogram does not exsist. Cannot visualize");
+        return;
+    }
+
+    let width = spectrogram.len();
+    let height = spectrogram[0].len();
+
+    let mut min_log_mag = f64::MAX; // goes to min
+    let mut max_log_mag = f64::MIN; // goes to max
+
+    for time_slice in spectrogram {
+        for &magnitude in time_slice {
+            if magnitude < 1e-10 {
+                continue;
+            }
+
+            let log_mag = (magnitude - 1e-6).log10();
+            min_log_mag = min_log_mag.min(log_mag);
+            max_log_mag = max_log_mag.max(log_mag);
+        }
+    }
+
+    let log_mag_range = max_log_mag - min_log_mag;
+    let log_mag_range = if log_mag_range < 1e-6 {
+        1.0
+    } else {
+        log_mag_range
+    };
+
+    let mut img_buf = image::GrayImage::new(width as u32, height as u32);
+
+    for (t, time_slice) in spectrogram.iter().enumerate() {
+        for (f, magnitude) in time_slice.iter().enumerate() {
+            let log_mag = (magnitude + 1e-6).log10();
+            let scaled_val = (log_mag - min_log_mag) / log_mag_range;
+            let intensity = (scaled_val.clamp(0.0, 1.0) * 255.0).round() as u8;
+
+            let x = t as u32;
+            let y = (height - 1 - f) as u32;
+
+            img_buf.put_pixel(x, y, image::Luma([intensity]));
+        }
+    }
+
+    match img_buf.save(output_path) {
+        Ok(_) => println!("Spectrogram saved to {}", output_path),
+        Err(e) => eprintln!("Error saving spectrogram: {}", e),
+    }
 }
