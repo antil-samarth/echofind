@@ -114,6 +114,31 @@ fn main() {
         .collect();
 
     println!("Frequency bands converted to bin ranges: {:?}", bin_ranges);
+    let mut peaks: Vec<(usize, usize)> = Vec::new();
+
+    for (time_slice_index, magnitudes) in spectrogram.iter().enumerate() {
+        for &(low_bin, high_bin) in &bin_ranges {
+            if high_bin > magnitudes.len() {
+                continue;
+            }
+
+            let band_slice = &magnitudes[low_bin..high_bin];
+
+            if let Some((max_index_in_band, _)) = band_slice
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                let absolute_bin_index = low_bin + max_index_in_band;
+                peaks.push((time_slice_index, absolute_bin_index));
+            }
+        }
+    }
+
+    println!("Found {} peaks", peaks.len());
+    if peaks.len() > 15 {
+        println!("First few peaks (time, freq_bin): {:?}", &peaks[0..14]);
+    }
 }
 
 fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
