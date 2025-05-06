@@ -8,10 +8,12 @@ fn main() {
     const WINDOW_SIZE: usize = 1024;
     const HOP_SIZE: usize = 64;
     const FREQ_BANDS: &[usize] = &[5, 80, 160, 320, 640, 1280, 4096]; // Frequency bands in Hz
+    const MIN_TIME_DELTA: usize = 15;
+    const MAX_TIME_DELTA: usize = 45;
+    const TARGET_FANOUT: usize = 4;
 
-    println!("Hello, world!");
     let mut reader = hound::WavReader::open("src/media/wav/01_Genesis.wav")
-        .expect("Failed to open file OONGA BOONGA");
+        .expect("Failed to open the specified WAV file");
     println!("file name - 01_Genesis.wav");
     let spec = reader.spec();
     println!("Sample rate: {}", spec.sample_rate);
@@ -139,6 +141,36 @@ fn main() {
     if peaks.len() > 15 {
         println!("First few peaks (time, freq_bin): {:?}", &peaks[0..14]);
     }
+
+    let mut hashes: Vec<(u64, usize)> = Vec::new();
+
+    for i in 0..peaks.len() {
+        let anchor = peaks[i];
+        let mut targets_count = 0;
+
+        for j in (i + 1)..peaks.len() {
+            let target = peaks[j];
+            let time_diff = target.0 - anchor.0;
+            if time_diff > MAX_TIME_DELTA {
+                break;
+            }
+
+            if time_diff >= MIN_TIME_DELTA && time_diff <= MAX_TIME_DELTA {
+                let hash = create_hash(anchor.1, target.1, time_diff);
+
+                hashes.push((hash, anchor.0));
+
+                targets_count += 1;
+
+                if targets_count >= TARGET_FANOUT {
+                    break;
+                }
+            }
+        }
+    }
+
+    println!("Generated {} hashes.", hashes.len());
+    println!("First few hashes (hash, time): {:?}", &hashes[0..10]);
 }
 
 fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
@@ -182,9 +214,22 @@ fn hz_to_bin(hz: usize, sample_rate: u32, window_size: usize) -> usize {
     (hz as f64 / freq_res).round() as usize
 }
 
+fn create_hash(anchor_freq_bin: usize, target_freq_bin: usize, time_diff: usize) -> u64 {
+    if anchor_freq_bin >= (1 << 22) {
+        panic!("Anchor frequency bin exceeds the 22-bit limit: {}", anchor_freq_bin);
+    }
+    if target_freq_bin >= (1 << 10) {
+        panic!("Target frequency bin exceeds the 10-bit limit: {}", target_freq_bin);
+    }
+    if time_diff >= (1 << 12) {
+        panic!("Time difference exceeds the 12-bit limit: {}", time_diff);
+    }
+    ((anchor_freq_bin as u64) << 22) | ((target_freq_bin as u64) << 12) | (time_diff as u64)
+}
+
 fn spectrogram_to_image(spectrogram: &Vec<Vec<f64>>, output_path: &str) {
     if spectrogram.is_empty() || spectrogram[0].is_empty() {
-        eprintln!("Spectrogram does not exsist. Cannot visualize");
+        eprintln!("Spectrogram does not exist. Cannot visualize");
         return;
     }
 
