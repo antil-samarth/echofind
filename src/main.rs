@@ -1,9 +1,10 @@
 use hound;
 use image;
-use rustfft::{FftPlanner, num_complex::Complex};
+use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
-fn main() {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // constants
     const TARGET_SAMPLE_RATE: u32 = 8192;
     const WINDOW_SIZE: usize = 1024;
     const HOP_SIZE: usize = 64;
@@ -12,79 +13,19 @@ fn main() {
     const MAX_TIME_DELTA: usize = 45;
     const TARGET_FANOUT: usize = 4;
 
-    let mut reader = hound::WavReader::open("src/media/wav/01_Genesis.wav")
-        .expect("Failed to open the specified WAV file");
-    println!("file name - 01_Genesis.wav");
-    let spec = reader.spec();
-    println!("Sample rate: {}", spec.sample_rate);
-    println!("Channels: {}", spec.channels);
-    println!("Bits per sample: {}", spec.bits_per_sample);
-    println!("Sample format: {:?}", spec.sample_format);
-    println!("Total samples: {}", reader.len());
-    println!(
-        "Duration: {} seconds",
-        reader.duration() as f32 / spec.sample_rate as f32
-    );
+    let filepath = "src/media/wav/01_Genesis.wav";
+    println!("Loading and preparing audio file: {}", filepath);
 
-    let samples_result: Result<Vec<i16>, hound::Error> = reader.samples::<i16>().collect();
-    let mut samples_vec = samples_result.expect("Failed to read all samples");
-
-    println!("Number of samples read: {}", samples_vec.len());
-    println!("First 10 samples: {:?}", &samples_vec[0..10]);
-
-    if spec.channels == 2 {
-        println!("This is a stereo file");
-        println!("Converting to mono");
-
-        samples_vec = samples_vec
-            .chunks_exact(2)
-            .map(|chunk: &[i16]| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
-            .collect();
-
-        println!("Number of samples read: {}", samples_vec.len());
-        println!("First 10 samples: {:?}", &samples_vec[0..10]);
-    }
-
-    let downsampled_samples = downsample(&samples_vec, spec.sample_rate, TARGET_SAMPLE_RATE);
-    println!("Number of samples read: {}", downsampled_samples.len());
-    println!("First 10 samples: {:?}", &downsampled_samples[0..10]);
+    let samples_vec = load_and_prepare_audio(filepath, TARGET_SAMPLE_RATE)?;
 
     let window_coefficients = hamming_window(WINDOW_SIZE);
-    println!(
-        "Generated Hamming window {} coefficients",
-        window_coefficients.len()
-    );
+    println!("Generated Hamming window.",);
 
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(WINDOW_SIZE);
 
-    let mut spectrogram: Vec<Vec<f64>> = Vec::new();
-
-    println!("Generating spectrogram...");
-
-    for audio_chunk in downsampled_samples.windows(WINDOW_SIZE).step_by(HOP_SIZE) {
-        let mut complex_buffer: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); WINDOW_SIZE];
-
-        for (i, (sample, coeff)) in audio_chunk
-            .iter()
-            .zip(window_coefficients.iter())
-            .enumerate()
-        {
-            complex_buffer[i] = Complex::new(*sample as f64 * coeff, 0.0);
-        }
-
-        fft.process(&mut complex_buffer);
-
-        let num_freq_bins = WINDOW_SIZE / 2;
-        let mut magnitudes = Vec::with_capacity(num_freq_bins);
-
-        for i in 0..num_freq_bins {
-            let magnitude = complex_buffer[i].norm_sqr();
-            magnitudes.push(magnitude);
-        }
-
-        spectrogram.push(magnitudes);
-    }
+    let spectrogram =
+        compute_spectrogram(samples_vec, window_coefficients, WINDOW_SIZE, HOP_SIZE, fft);
 
     println!(
         "Spectrogram generated: {} time slices, {} frequency bins",
@@ -98,7 +39,7 @@ fn main() {
 
     // Save the spectrogram as an image
     /* let output_path = "src/media/spectrogram.png";
-    spectrogram_to_image(&spectrogram, output_path); */
+    _spectrogram_to_image(&spectrogram, output_path); */
 
     let bin_ranges: Vec<(usize, usize)> = FREQ_BANDS
         .windows(2)
@@ -138,10 +79,23 @@ fn main() {
     }
 
     println!("Found {} peaks", peaks.len());
-    if peaks.len() > 15 {
+    /* if peaks.len() > 15 {
         println!("First few peaks (time, freq_bin): {:?}", &peaks[0..14]);
-    }
+    } */
 
+    let hashes = generate_hashes(&peaks, MIN_TIME_DELTA, MAX_TIME_DELTA, TARGET_FANOUT);
+    println!("Generated {} hashes.", hashes.len());
+    //println!("First few hashes (hash, time): {:?}", &hashes[0..10]);
+
+    Ok(())
+}
+
+fn generate_hashes(
+    peaks: &Vec<(usize, usize)>,
+    min_time_delta: usize,
+    max_time_delta: usize,
+    target_fanout: usize,
+) -> Vec<(u64, usize)> {
     let mut hashes: Vec<(u64, usize)> = Vec::new();
 
     for i in 0..peaks.len() {
@@ -151,26 +105,111 @@ fn main() {
         for j in (i + 1)..peaks.len() {
             let target = peaks[j];
             let time_diff = target.0 - anchor.0;
-            if time_diff > MAX_TIME_DELTA {
+            if time_diff > max_time_delta {
                 break;
             }
 
-            if time_diff >= MIN_TIME_DELTA && time_diff <= MAX_TIME_DELTA {
+            if time_diff >= min_time_delta && time_diff <= max_time_delta {
                 let hash = create_hash(anchor.1, target.1, time_diff);
 
                 hashes.push((hash, anchor.0));
 
                 targets_count += 1;
 
-                if targets_count >= TARGET_FANOUT {
+                if targets_count >= target_fanout {
                     break;
                 }
             }
         }
     }
+    hashes
+}
 
-    println!("Generated {} hashes.", hashes.len());
-    println!("First few hashes (hash, time): {:?}", &hashes[0..10]);
+fn compute_spectrogram(
+    samples_vec: Vec<i16>,
+    window_coefficients: Vec<f64>,
+    window_size: usize,
+    hop_size: usize,
+    fft: std::sync::Arc<dyn Fft<f64>>,
+) -> Vec<Vec<f64>> {
+    let mut spectrogram: Vec<Vec<f64>> = Vec::new();
+
+    println!("Generating spectrogram...");
+
+    for audio_chunk in samples_vec.windows(window_size).step_by(hop_size) {
+        let mut complex_buffer: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); window_size];
+
+        for (i, (sample, coeff)) in audio_chunk
+            .iter()
+            .zip(window_coefficients.iter())
+            .enumerate()
+        {
+            complex_buffer[i] = Complex::new(*sample as f64 * coeff, 0.0);
+        }
+
+        fft.process(&mut complex_buffer);
+
+        let num_freq_bins = window_size / 2;
+        let mut magnitudes = Vec::with_capacity(num_freq_bins);
+
+        for i in 0..num_freq_bins {
+            let magnitude = complex_buffer[i].norm_sqr();
+            magnitudes.push(magnitude);
+        }
+
+        spectrogram.push(magnitudes);
+    }
+    spectrogram
+}
+
+fn load_and_prepare_audio(
+    filepath: &str,
+    target_sample_rate: u32,
+) -> Result<Vec<i16>, Box<dyn std::error::Error>> {
+    let mut reader = hound::WavReader::open(filepath)?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+
+    let mut samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>()?;
+
+    println!(
+        "Loaded file: {}:\n\tRate={}, \n\tChannels={}, \n\tBits={}, \n\tFormat={:?}\n, \n\tSamples={}",
+        filepath,
+        spec.sample_rate,
+        spec.channels,
+        spec.bits_per_sample,
+        spec.sample_format,
+        reader.len()
+    );
+
+    if spec.channels == 2 {
+        println!("Received audio is stereo, converting to mono");
+
+        samples = samples
+            .chunks_exact(2)
+            .map(|chunk: &[i16]| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
+            .collect();
+    } else if spec.channels > 2 {
+        eprintln!("Received audio has more than 2 channels, only stereo is supported");
+        return Err("Only mono and stereo audio is supported".into());
+    }
+
+    if sample_rate > target_sample_rate {
+        println!(
+            "Downsampling audio from {} Hz to {} Hz",
+            sample_rate, target_sample_rate
+        );
+        samples = downsample(&samples, sample_rate, target_sample_rate as u32);
+    } else if sample_rate < target_sample_rate {
+        eprintln!(
+            "Upsampling audio from {} Hz to {} Hz is not supported",
+            sample_rate, target_sample_rate
+        );
+        return Err("Upsampling is not supported".into());
+    }
+    println!("Audio loaded and prepared successfully");
+
+    Ok(samples)
 }
 
 fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
@@ -182,12 +221,12 @@ fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32
         panic!("Up-sampling is not supported");
     }
 
-    println!("Downsampling to {} Hz", target_sample_rate);
+    //println!("Downsampling to {} Hz", target_sample_rate);
 
     let mut downsampled_samples = Vec::new();
 
     let step = orginal_sample_rate / target_sample_rate;
-    println!("Step: {}", step);
+    //println!("Step: {}", step);
 
     for sample in samples.iter().step_by(step as usize) {
         downsampled_samples.push(*sample);
@@ -216,10 +255,16 @@ fn hz_to_bin(hz: usize, sample_rate: u32, window_size: usize) -> usize {
 
 fn create_hash(anchor_freq_bin: usize, target_freq_bin: usize, time_diff: usize) -> u64 {
     if anchor_freq_bin >= (1 << 22) {
-        panic!("Anchor frequency bin exceeds the 22-bit limit: {}", anchor_freq_bin);
+        panic!(
+            "Anchor frequency bin exceeds the 22-bit limit: {}",
+            anchor_freq_bin
+        );
     }
     if target_freq_bin >= (1 << 10) {
-        panic!("Target frequency bin exceeds the 10-bit limit: {}", target_freq_bin);
+        panic!(
+            "Target frequency bin exceeds the 10-bit limit: {}",
+            target_freq_bin
+        );
     }
     if time_diff >= (1 << 12) {
         panic!("Time difference exceeds the 12-bit limit: {}", time_diff);
@@ -227,7 +272,7 @@ fn create_hash(anchor_freq_bin: usize, target_freq_bin: usize, time_diff: usize)
     ((anchor_freq_bin as u64) << 22) | ((target_freq_bin as u64) << 12) | (time_diff as u64)
 }
 
-fn spectrogram_to_image(spectrogram: &Vec<Vec<f64>>, output_path: &str) {
+fn _spectrogram_to_image(spectrogram: &Vec<Vec<f64>>, output_path: &str) {
     if spectrogram.is_empty() || spectrogram[0].is_empty() {
         eprintln!("Spectrogram does not exist. Cannot visualize");
         return;
