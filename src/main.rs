@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const DB_PATH: &str = "src/media/audio_fingerprints.db";
     const FILEPATH: &str = "src/media/wav/01_Genesis.wav";
 
-    println!("Connecting to database: {}", DB_PATH);
+    println!("\nConnecting to database: {}", DB_PATH);
     let conn = Connection::open(DB_PATH)?;
     println!("Connected to database.");
 
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Using song_id: {}", song_id);
 
-    println!("Loading and preparing audio file: {}", FILEPATH);
+    println!("\nLoading and preparing audio file: {}", FILEPATH);
 
     let samples_vec = load_and_prepare_audio(FILEPATH, TARGET_SAMPLE_RATE)?;
 
@@ -140,7 +140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } */
 
     let hashes = generate_hashes(&peaks, MIN_TIME_DELTA, MAX_TIME_DELTA, TARGET_FANOUT);
-    println!("Generated {} hashes.", hashes.len());
+    println!("\nGenerated {} hashes.", hashes.len());
     //println!("First few hashes (hash, time): {:?}", &hashes[0..10]);
 
     Ok(())
@@ -190,7 +190,7 @@ fn compute_spectrogram(
 ) -> Vec<Vec<f64>> {
     let mut spectrogram: Vec<Vec<f64>> = Vec::new();
 
-    println!("Generating spectrogram...");
+    println!("\nGenerating spectrogram...");
 
     for audio_chunk in samples_vec.windows(window_size).step_by(hop_size) {
         let mut complex_buffer: Vec<Complex<f64>> = vec![Complex::new(0.0, 0.0); window_size];
@@ -229,8 +229,7 @@ fn load_and_prepare_audio(
     let mut samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>()?;
 
     println!(
-        "Loaded file: {}:\n\tRate={}, \n\tChannels={}, \n\tBits={}, \n\tFormat={:?}, \n\tSamples={}\n",
-        filepath,
+        " File info:\n  ├ Sample Rate: {} Hz\n  ├ Channels: {}\n  ├ Bits: {}\n  ├ Format: {:?}\n  └ Samples: {}",
         spec.sample_rate,
         spec.channels,
         spec.bits_per_sample,
@@ -239,7 +238,7 @@ fn load_and_prepare_audio(
     );
 
     if spec.channels == 2 {
-        println!("Received audio is stereo, converting to mono");
+        println!("Stereo audio detected. Converting to mono.");
 
         samples = samples
             .chunks_exact(2)
@@ -252,15 +251,12 @@ fn load_and_prepare_audio(
 
     if sample_rate > target_sample_rate {
         println!(
-            "Downsampling audio from {} Hz to {} Hz",
+            "Downsampling: {} Hz → {} Hz",
             sample_rate, target_sample_rate
         );
         samples = downsample(&samples, sample_rate, target_sample_rate as u32);
     } else if sample_rate < target_sample_rate {
-        eprintln!(
-            "Upsampling audio from {} Hz to {} Hz is not supported",
-            sample_rate, target_sample_rate
-        );
+        eprintln!("Upsampling audio is not supported");
         return Err("Upsampling is not supported".into());
     }
     println!("Audio loaded and prepared successfully");
