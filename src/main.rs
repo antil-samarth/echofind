@@ -1,5 +1,6 @@
 use hound;
 use image;
+use rusqlite::{Connection, params};
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
 use std::f64::consts::PI;
 
@@ -12,11 +13,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const MIN_TIME_DELTA: usize = 15;
     const MAX_TIME_DELTA: usize = 45;
     const TARGET_FANOUT: usize = 4;
+    const DB_PATH: &str = "src/media/audio_fingerprints.db";
+    const FILEPATH: &str = "src/media/wav/01_Genesis.wav";
 
-    let filepath = "src/media/wav/01_Genesis.wav";
-    println!("Loading and preparing audio file: {}", filepath);
+    println!("Connecting to database: {}", DB_PATH);
+    let conn = Connection::open(DB_PATH)?;
+    println!("Connected to database.");
 
-    let samples_vec = load_and_prepare_audio(filepath, TARGET_SAMPLE_RATE)?;
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS songs (
+        song_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+        filepath    TEXT NOT NULL UNIQUE
+    )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS fingerprints (
+            hash        INTEGER NOT NULL,
+            time_offset INTEGER NOT NULL,
+            song_id     INTEGER NOT NULL,
+            FOREIGN KEY (song_id) REFERENCES songs (song_id)
+        )",
+        [],
+    )?;
+
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_hash ON fingerprints (hash)",
+        [],
+    )?;
+
+    let insert_result = conn.execute(
+        "INSERT OR IGNORE INTO songs (filepath) VALUES (?)",
+        params![FILEPATH],
+    );
+
+    match insert_result {
+        Ok(rows_changed) => {
+            if rows_changed > 0 {
+                println!("New song inserted into 'songs' table.");
+            } else {
+                println!("Song filepath already exists in 'songs' table.")
+            }
+        }
+        Err(e) => {
+            eprintln!("Error inserting song: {}", e);
+            return Err(e.into());
+        }
+    }
+
+    let song_id: i64 = conn.query_row(
+        "SELECT song_id FROM songs WHERE filepath = ?1",
+        params![FILEPATH],
+        |row| row.get(0),
+    )?;
+
+    println!("Using song_id: {}", song_id);
+
+    println!("Loading and preparing audio file: {}", FILEPATH);
+
+    let samples_vec = load_and_prepare_audio(FILEPATH, TARGET_SAMPLE_RATE)?;
 
     let window_coefficients = hamming_window(WINDOW_SIZE);
     println!("Generated Hamming window.",);
@@ -173,7 +229,7 @@ fn load_and_prepare_audio(
     let mut samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>()?;
 
     println!(
-        "Loaded file: {}:\n\tRate={}, \n\tChannels={}, \n\tBits={}, \n\tFormat={:?}\n, \n\tSamples={}",
+        "Loaded file: {}:\n\tRate={}, \n\tChannels={}, \n\tBits={}, \n\tFormat={:?}, \n\tSamples={}\n",
         filepath,
         spec.sample_rate,
         spec.channels,
