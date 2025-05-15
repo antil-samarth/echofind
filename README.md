@@ -1,8 +1,7 @@
 # EchoFind: Music Recognition in Rust
 
 [![Language: Rust](https://img.shields.io/badge/language-Rust-orange.svg)](https://www.rust-lang.org/)
-<!-- [![Database: SQLite](https://img.shields.io/badge/database-SQLite-blue.svg)](https://sqlite.org/index.html) -->
-<!-- Add other badges later, e.g., license, build status -->
+[![Database: SQLite](https://img.shields.io/badge/database-SQLite-blue.svg)](https://sqlite.org/index.html)
 
 A project implementing the core principles of audio fingerprinting and recognition, similar to Shazam or Google Pixel's "Now Playing" feature, built using Rust and SQLite.
 
