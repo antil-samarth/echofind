@@ -2,7 +2,7 @@ use hound;
 use image;
 use rusqlite::{Connection, params};
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
-use std::f64::consts::PI;
+use std::{f64::consts::PI, fs::read_dir};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // constants
@@ -14,10 +14,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     const MAX_TIME_DELTA: usize = 45;
     const TARGET_FANOUT: usize = 4;
     const DB_PATH: &str = "src/media/audio_fingerprints.db";
-    const FILEPATH: &str = "src/media/wav/01_Genesis.wav";
+    /* const FILEPATH: &str = "src/media/wav/01_Genesis.wav"; */
+    const AUDIO_DIR: &str = "src/media/wav/";
 
     println!("\nConnecting to database: {}", DB_PATH);
-    let conn = Connection::open(DB_PATH)?;
+    let mut conn = Connection::open(DB_PATH)?;
     println!("Connected to database.");
 
     conn.execute(
@@ -43,76 +44,147 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [],
     )?;
 
-    let insert_result = conn.execute(
-        "INSERT OR IGNORE INTO songs (filepath) VALUES (?)",
-        params![FILEPATH],
-    );
-
-    match insert_result {
-        Ok(rows_changed) => {
-            if rows_changed > 0 {
-                println!("New song inserted into 'songs' table.");
-            } else {
-                println!("Song filepath already exists in 'songs' table.")
-            }
-        }
-        Err(e) => {
-            eprintln!("Error inserting song: {}", e);
-            return Err(e.into());
+    println!("\nScanning directory: {}", AUDIO_DIR);
+    let mut audio_files = Vec::new();
+    for entry in read_dir(AUDIO_DIR)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file() && path.extension().map_or(false, |ext| ext == "wav") {
+            audio_files.push(path.to_string_lossy().to_string());
+            println!("Found audio file: {}", path.display());
         }
     }
+    println!("Found {} audio files.", audio_files.len());
+
+    let mut audios_processed = 0;
+
+    for filepath in &audio_files {
+        println!("\n--- Processing: {} ---", filepath);
+
+        let exists_check: Result<i64, rusqlite::Error> = conn.query_row(
+            "SELECT song_id FROM songs WHERE filepath = ?1",
+            rusqlite::params![&filepath], // Pass filepath by reference here
+            |row| row.get::<usize, i64>(0),
+        );
+        match exists_check {
+            Ok(exsisting_id) => {
+                println!(
+                    "Song already exists in the database with ID: {}",
+                    exsisting_id
+                );
+                continue;
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                println!("Song not found in the database, proceeding to insert.");
+            }
+            Err(e) => {
+                eprintln!("Error checking DB for song existence: {}", e);
+                return Err(e.into());
+            }
+        }
+
+        let song_id = match insert_song_record(&mut conn, &filepath) {
+            Ok(id) => {
+                println!("Inserted new song record with ID: {}", id);
+                id
+            }
+            Err(e) => {
+                eprintln!("Error inserting song record: {}", e);
+                continue;
+            }
+        };
+        println!("Using song_id: {}", song_id);
+
+        let hashes = match process_audio_file(
+            &filepath,
+            TARGET_SAMPLE_RATE,
+            FREQ_BANDS,
+            WINDOW_SIZE,
+            HOP_SIZE,
+            MIN_TIME_DELTA,
+            MAX_TIME_DELTA,
+            TARGET_FANOUT,
+        ) {
+            Ok(hashes) => {
+                println!("Generated {} hashes for song ID: {}", hashes.len(), song_id);
+                hashes
+            }
+            Err(e) => {
+                eprintln!("Error processing audio file: {}", e);
+                continue;
+            }
+        };
+
+        match insert_fingerprints(&mut conn, &hashes, song_id) {
+            Ok(_) => {
+                println!(
+                    "Inserted {} fingerprints for song ID: {}",
+                    hashes.len(),
+                    song_id
+                );
+            }
+            Err(e) => {
+                eprintln!("Error inserting fingerprints: {}", e);
+                continue;
+            }
+        }
+        println!("{} Fingerprints inserted successfully.", hashes.len());
+
+        audios_processed += 1;
+    }
+    println!(
+        "\nProcessed {} audio files, skipped {} files.",
+        audios_processed,
+        audio_files.len() - audios_processed
+    );
+    println!("All done!");
+
+    Ok(())
+}
+
+fn insert_song_record(conn: &mut Connection, filepath: &str) -> Result<i64, rusqlite::Error> {
+    let mut stmt = conn.prepare("INSERT INTO songs (filepath) VALUES (?1)")?;
+    stmt.execute(params![filepath])?;
 
     let song_id: i64 = conn.query_row(
         "SELECT song_id FROM songs WHERE filepath = ?1",
-        params![FILEPATH],
+        params![filepath],
         |row| row.get(0),
     )?;
 
-    println!("Using song_id: {}", song_id);
+    Ok(song_id)
+}
 
-    println!("\nLoading and preparing audio file: {}", FILEPATH);
-
-    let samples_vec = load_and_prepare_audio(FILEPATH, TARGET_SAMPLE_RATE)?;
-
-    let window_coefficients = hamming_window(WINDOW_SIZE);
-    println!("Generated Hamming window.",);
-
+fn process_audio_file(
+    filepath: &str,
+    target_sample_rate: u32,
+    freq_bands: &[usize],
+    window_size: usize,
+    hop_size: usize,
+    min_time_delta: usize,
+    max_time_delta: usize,
+    target_fanout: usize,
+) -> Result<Vec<(u64, usize)>, Box<dyn std::error::Error>> {
+    println!("\nLoading and preparing audio file: {}", filepath);
+    let samples_vec = load_and_prepare_audio(filepath, target_sample_rate)?;
+    let window_coefficients = hamming_window(window_size);
     let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(WINDOW_SIZE);
+    let fft = planner.plan_fft_forward(window_size);
 
     let spectrogram =
-        compute_spectrogram(samples_vec, window_coefficients, WINDOW_SIZE, HOP_SIZE, fft);
+        compute_spectrogram(samples_vec, window_coefficients, window_size, hop_size, fft);
 
-    println!(
-        "Spectrogram generated: {} time slices, {} frequency bins",
-        spectrogram.len(),
-        if spectrogram.is_empty() {
-            0
-        } else {
-            spectrogram[0].len()
-        }
-    );
-
-    // Save the spectrogram as an image
-    /* let output_path = "src/media/spectrogram.png";
-    _spectrogram_to_image(&spectrogram, output_path); */
-
-    let bin_ranges: Vec<(usize, usize)> = FREQ_BANDS
+    let bin_ranges = freq_bands
         .windows(2)
-        .map(|pair| {
-            let low_bin = hz_to_bin(pair[0], TARGET_SAMPLE_RATE, WINDOW_SIZE);
-            let high_bin = hz_to_bin(pair[1], TARGET_SAMPLE_RATE, WINDOW_SIZE);
-            if high_bin <= low_bin {
-                panic!(
-                    "High bin is less than or equal to low bin for frequency band: {:?}",
-                    pair
-                );
-            }
-            (low_bin, high_bin)
+        .map(|band| {
+            (
+                hz_to_bin(band[0], target_sample_rate, window_size),
+                hz_to_bin(band[1], target_sample_rate, window_size),
+            )
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    println!("Frequency bands converted to bin ranges: {:?}", bin_ranges);
+    /* let bin_ranges: Vec<(usize, usize)> = vec![(0, 5), (5, 80), (80, 160), (160, 320), (320, 640), (640, 1280), (1280, 4096)]; */
     let mut peaks: Vec<(usize, usize)> = Vec::new();
 
     for (time_slice_index, magnitudes) in spectrogram.iter().enumerate() {
@@ -120,7 +192,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if high_bin > magnitudes.len() {
                 continue;
             }
-
             let band_slice = &magnitudes[low_bin..high_bin];
 
             if let Some((max_index_in_band, _)) = band_slice
@@ -134,16 +205,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    println!("Found {} peaks", peaks.len());
-    /* if peaks.len() > 15 {
-        println!("First few peaks (time, freq_bin): {:?}", &peaks[0..14]);
-    } */
+    println!("Found {} peaks.", peaks.len());
 
-    let hashes = generate_hashes(&peaks, MIN_TIME_DELTA, MAX_TIME_DELTA, TARGET_FANOUT);
-    println!("\nGenerated {} hashes.", hashes.len());
-    //println!("First few hashes (hash, time): {:?}", &hashes[0..10]);
+    let hashes = generate_hashes(&peaks, min_time_delta, max_time_delta, target_fanout);
+    Ok(hashes)
+}
 
+fn insert_fingerprints(
+    conn: &mut Connection,
+    hashes: &Vec<(u64, usize)>,
+    song_id: i64,
+) -> Result<(), rusqlite::Error> {
+    let tx = conn.transaction()?;
+    {
+        let mut stmt = tx
+            .prepare("INSERT INTO fingerprints (hash, time_offset, song_id) VALUES (?1, ?2, ?3)")?;
+        for (hash, time_offset) in hashes {
+            stmt.execute(params![*hash as i64, *time_offset as i64, song_id])?;
+        }
+    }
+    tx.commit()?;
+    println!("Fingerprints inserted successfully.");
     Ok(())
+}
+
+fn load_and_prepare_audio(
+    filepath: &str,
+    target_sample_rate: u32,
+) -> Result<Vec<i16>, Box<dyn std::error::Error>> {
+    let mut reader = hound::WavReader::open(filepath)?;
+    let spec = reader.spec();
+    let sample_rate = spec.sample_rate;
+
+    let mut samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>()?;
+
+    println!(
+        " File info:\n  ├ Sample Rate: {} Hz\n  ├ Channels: {}\n  ├ Bits: {}\n  ├ Format: {:?}\n  └ Samples: {}",
+        spec.sample_rate,
+        spec.channels,
+        spec.bits_per_sample,
+        spec.sample_format,
+        reader.len()
+    );
+
+    if spec.channels == 2 {
+        println!("Stereo audio detected. Converting to mono.");
+
+        samples = samples
+            .chunks_exact(2)
+            .map(|chunk: &[i16]| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
+            .collect();
+    } else if spec.channels > 2 {
+        eprintln!("Received audio has more than 2 channels, only stereo is supported");
+        return Err("Only mono and stereo audio is supported".into());
+    }
+
+    if sample_rate > target_sample_rate {
+        println!(
+            "Downsampling: {} Hz → {} Hz",
+            sample_rate, target_sample_rate
+        );
+        samples = downsample(&samples, sample_rate, target_sample_rate as u32);
+    } else if sample_rate < target_sample_rate {
+        eprintln!("Upsampling audio is not supported");
+        return Err("Upsampling is not supported".into());
+    }
+    println!("Audio loaded and prepared successfully");
+
+    Ok(samples)
 }
 
 fn generate_hashes(
@@ -216,52 +345,6 @@ fn compute_spectrogram(
         spectrogram.push(magnitudes);
     }
     spectrogram
-}
-
-fn load_and_prepare_audio(
-    filepath: &str,
-    target_sample_rate: u32,
-) -> Result<Vec<i16>, Box<dyn std::error::Error>> {
-    let mut reader = hound::WavReader::open(filepath)?;
-    let spec = reader.spec();
-    let sample_rate = spec.sample_rate;
-
-    let mut samples: Vec<i16> = reader.samples::<i16>().collect::<Result<_, _>>()?;
-
-    println!(
-        " File info:\n  ├ Sample Rate: {} Hz\n  ├ Channels: {}\n  ├ Bits: {}\n  ├ Format: {:?}\n  └ Samples: {}",
-        spec.sample_rate,
-        spec.channels,
-        spec.bits_per_sample,
-        spec.sample_format,
-        reader.len()
-    );
-
-    if spec.channels == 2 {
-        println!("Stereo audio detected. Converting to mono.");
-
-        samples = samples
-            .chunks_exact(2)
-            .map(|chunk: &[i16]| ((chunk[0] as i32 + chunk[1] as i32) / 2) as i16)
-            .collect();
-    } else if spec.channels > 2 {
-        eprintln!("Received audio has more than 2 channels, only stereo is supported");
-        return Err("Only mono and stereo audio is supported".into());
-    }
-
-    if sample_rate > target_sample_rate {
-        println!(
-            "Downsampling: {} Hz → {} Hz",
-            sample_rate, target_sample_rate
-        );
-        samples = downsample(&samples, sample_rate, target_sample_rate as u32);
-    } else if sample_rate < target_sample_rate {
-        eprintln!("Upsampling audio is not supported");
-        return Err("Upsampling is not supported".into());
-    }
-    println!("Audio loaded and prepared successfully");
-
-    Ok(samples)
 }
 
 fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
