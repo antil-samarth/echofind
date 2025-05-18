@@ -2,101 +2,158 @@ use hound;
 use image;
 use rusqlite::{Connection, params};
 use rustfft::{Fft, FftPlanner, num_complex::Complex};
-use std::{f64::consts::PI, fs::read_dir};
+use std::{cmp::Ordering, collections::HashMap, f64::consts::PI, fs::read_dir};
+
+mod config;
+
+use config::{
+    FREQ_BANDS, HOP_SIZE, MAX_TIME_DELTA, MIN_PEAK_FREQ_DISTANCE, MIN_PEAK_TIME_DISTANCE,
+    MIN_TIME_DELTA, PEAK_THRESHOLD_FACTOR, TARGET_FANOUT, TARGET_SAMPLE_RATE, WINDOW_SIZE,
+};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // constants
-    const TARGET_SAMPLE_RATE: u32 = 8192;
-    const WINDOW_SIZE: usize = 1024;
-    const HOP_SIZE: usize = 64;
-    const FREQ_BANDS: &[usize] = &[5, 80, 160, 320, 640, 1280, 4096]; // Frequency bands in Hz
-    const MIN_TIME_DELTA: usize = 15;
-    const MAX_TIME_DELTA: usize = 45;
-    const TARGET_FANOUT: usize = 4;
     const DB_PATH: &str = "src/media/audio_fingerprints.db";
-    /* const FILEPATH: &str = "src/media/wav/01_Genesis.wav"; */
     const AUDIO_DIR: &str = "src/media/wav/";
+    const INPUT_FILE: &str = "src/media/recording/recording1.wav";
 
-    println!("\nConnecting to database: {}", DB_PATH);
-    let mut conn = Connection::open(DB_PATH)?;
-    println!("Connected to database.");
+    const MODE: &str = "test"; // "test" or "train"
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS songs (
-        song_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-        filepath    TEXT NOT NULL UNIQUE
-    )",
-        [],
-    )?;
+    if MODE == "train" {
+        println!("\nConnecting to database: {}", DB_PATH);
+        let mut conn = Connection::open(DB_PATH)?;
+        println!("Connected to database.");
 
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS fingerprints (
-            hash        INTEGER NOT NULL,
-            time_offset INTEGER NOT NULL,
-            song_id     INTEGER NOT NULL,
-            FOREIGN KEY (song_id) REFERENCES songs (song_id)
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS songs (
+            song_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+            filepath    TEXT NOT NULL UNIQUE
         )",
-        [],
-    )?;
+            [],
+        )?;
 
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_hash ON fingerprints (hash)",
-        [],
-    )?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS fingerprints (
+                hash        INTEGER NOT NULL,
+                time_offset INTEGER NOT NULL,
+                song_id     INTEGER NOT NULL,
+                FOREIGN KEY (song_id) REFERENCES songs (song_id)
+            )",
+            [],
+        )?;
 
-    println!("\nScanning directory: {}", AUDIO_DIR);
-    let mut audio_files = Vec::new();
-    for entry in read_dir(AUDIO_DIR)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "wav") {
-            audio_files.push(path.to_string_lossy().to_string());
-            println!("Found audio file: {}", path.display());
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_hash ON fingerprints (hash)",
+            [],
+        )?;
+
+        println!("\nScanning directory: {}", AUDIO_DIR);
+        let mut audio_files = Vec::new();
+        for entry in read_dir(AUDIO_DIR)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_file() && path.extension().map_or(false, |ext| ext == "wav") {
+                // Validate if the file is a valid audio file
+                if hound::WavReader::open(&path).is_ok() {
+                    audio_files.push(path.to_string_lossy().to_string());
+                    println!("Found valid audio file: {}", path.display());
+                } else {
+                    println!(
+                        "Skipping invalid or corrupted audio file: {}",
+                        path.display()
+                    );
+                }
+            }
         }
-    }
-    println!("Found {} audio files.", audio_files.len());
+        println!("Found {} audio files.", audio_files.len());
 
-    let mut audios_processed = 0;
+        let mut audios_processed = 0;
 
-    for filepath in &audio_files {
-        println!("\n--- Processing: {} ---", filepath);
+        for filepath in &audio_files {
+            println!("\n--- Processing: {} ---", filepath);
 
-        let exists_check: Result<i64, rusqlite::Error> = conn.query_row(
-            "SELECT song_id FROM songs WHERE filepath = ?1",
-            rusqlite::params![&filepath], // Pass filepath by reference here
-            |row| row.get::<usize, i64>(0),
+            let exists_check: Result<i64, rusqlite::Error> = conn.query_row(
+                "SELECT song_id FROM songs WHERE filepath = ?1",
+                rusqlite::params![&filepath], // Pass filepath by reference here
+                |row| row.get::<usize, i64>(0),
+            );
+            match exists_check {
+                Ok(existing_id) => {
+                    println!(
+                        "Song already exists in the database with ID: {}",
+                        existing_id
+                    );
+                    continue;
+                }
+                Err(rusqlite::Error::QueryReturnedNoRows) => {
+                    println!("Song not found in the database, proceeding to insert.");
+                }
+                Err(e) => {
+                    eprintln!("Error checking DB for song existence: {}", e);
+                    return Err(e.into());
+                }
+            }
+
+            let song_id = match insert_song_record(&mut conn, &filepath) {
+                Ok(id) => {
+                    println!("Inserted new song record with ID: {}", id);
+                    id
+                }
+                Err(e) => {
+                    eprintln!("Error inserting song record: {}", e);
+                    continue;
+                }
+            };
+            println!("Using song_id: {}", song_id);
+
+            let hashes = match process_audio_file(
+                &filepath,
+                TARGET_SAMPLE_RATE,
+                FREQ_BANDS,
+                WINDOW_SIZE,
+                HOP_SIZE,
+                MIN_TIME_DELTA,
+                MAX_TIME_DELTA,
+                TARGET_FANOUT,
+            ) {
+                Ok(hashes) => {
+                    println!("Generated {} hashes for song ID: {}", hashes.len(), song_id);
+                    hashes
+                }
+                Err(e) => {
+                    eprintln!("Error processing audio file: {}", e);
+                    continue;
+                }
+            };
+
+            match insert_fingerprints(&mut conn, &hashes, song_id) {
+                Ok(_) => {
+                    println!(
+                        "Inserted {} fingerprints for song ID: {}",
+                        hashes.len(),
+                        song_id
+                    );
+                }
+                Err(e) => {
+                    eprintln!("Error inserting fingerprints: {}", e);
+                    continue;
+                }
+            }
+            println!("{} Fingerprints inserted successfully.", hashes.len());
+
+            audios_processed += 1;
+        }
+        println!(
+            "\nProcessed {} audio files, skipped {} files.",
+            audios_processed,
+            audio_files.len() - audios_processed
         );
-        match exists_check {
-            Ok(exsisting_id) => {
-                println!(
-                    "Song already exists in the database with ID: {}",
-                    exsisting_id
-                );
-                continue;
-            }
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                println!("Song not found in the database, proceeding to insert.");
-            }
-            Err(e) => {
-                eprintln!("Error checking DB for song existence: {}", e);
-                return Err(e.into());
-            }
-        }
+        println!("All done!");
+    } else if MODE == "test" {
+        println!("\n ------ TESTING ------ ");
 
-        let song_id = match insert_song_record(&mut conn, &filepath) {
-            Ok(id) => {
-                println!("Inserted new song record with ID: {}", id);
-                id
-            }
-            Err(e) => {
-                eprintln!("Error inserting song record: {}", e);
-                continue;
-            }
-        };
-        println!("Using song_id: {}", song_id);
-
-        let hashes = match process_audio_file(
-            &filepath,
+        let snippet_hashes = process_audio_file(
+            INPUT_FILE,
             TARGET_SAMPLE_RATE,
             FREQ_BANDS,
             WINDOW_SIZE,
@@ -104,40 +161,98 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             MIN_TIME_DELTA,
             MAX_TIME_DELTA,
             TARGET_FANOUT,
-        ) {
-            Ok(hashes) => {
-                println!("Generated {} hashes for song ID: {}", hashes.len(), song_id);
-                hashes
-            }
-            Err(e) => {
-                eprintln!("Error processing audio file: {}", e);
-                continue;
-            }
-        };
+        )?;
+        if snippet_hashes.is_empty() {
+            println!("No hashes generated for the test file.");
+            return Ok(());
+        }
+        println!("Generated {} hashes for test file.", snippet_hashes.len());
+        let hash_count = snippet_hashes.len() as u32;
+        let conn = Connection::open(DB_PATH)?;
+        println!("Connected to database.");
 
-        match insert_fingerprints(&mut conn, &hashes, song_id) {
-            Ok(_) => {
-                println!(
-                    "Inserted {} fingerprints for song ID: {}",
-                    hashes.len(),
-                    song_id
-                );
-            }
-            Err(e) => {
-                eprintln!("Error inserting fingerprints: {}", e);
-                continue;
+        let mut histogram: HashMap<i64, HashMap<i64, u32>> = HashMap::new();
+        let mut stmt =
+            conn.prepare_cached("SELECT song_id, time_offset FROM fingerprints WHERE hash = ?1")?;
+        let mut total_matches = 0;
+
+        // Process hashes in batches
+        for (snippet_hash, snippet_anchor_time) in snippet_hashes.iter() {
+            let db_matches = stmt.query_map(rusqlite::params![*snippet_hash as i64], |row| {
+                Ok((row.get::<usize, i64>(0)?, row.get::<usize, i64>(1)?))
+            })?;
+
+            for result in db_matches {
+                if let Ok((db_song_id, db_time_offset)) = result {
+                    total_matches += 1;
+                    let offset_diff = db_time_offset - (*snippet_anchor_time as i64);
+
+                    *histogram
+                        .entry(db_song_id)
+                        .or_default()
+                        .entry(offset_diff)
+                        .or_default() += 1;
+                }
             }
         }
-        println!("{} Fingerprints inserted successfully.", hashes.len());
+        if total_matches == 0 {
+            println!("No matches found in the database.");
+            return Ok(());
+        }
+        println!("Total matches found: {}", total_matches);
 
-        audios_processed += 1;
+        // Optimize match finding
+        println!("\nAnalyzing matches...");
+        let mut matches: Vec<_> = histogram
+            .iter()
+            .map(|(&song_id, offsets)| {
+                let max_count_for_song = offsets.values().max().cloned().unwrap_or(0);
+                (song_id, max_count_for_song)
+            })
+            .filter(|&(_, count)| count > 2) // Adjust threshold as needed
+            .collect();
+
+        // Sort by match count in descending order
+        matches.sort_by(|a, b| b.1.cmp(&a.1));
+
+        if !matches.is_empty() {
+            println!("\nTop matches found:");
+
+            for (i, &(song_id, match_count)) in matches.iter().take(3).enumerate() {
+                println!("\nMatch #{}", i + 1);
+                println!("Song ID: {}", song_id);
+                println!("Match strength: {} matching points", match_count);
+
+                // Calculate match confidence
+                let confidence = (match_count as f64 / hash_count as f64) * 100.0;
+                let confidence = confidence.min(100.0);
+                println!("Confidence: {:.1}%", confidence);
+
+                // Fetch and display song details
+                if let Ok(filepath) = conn.query_row::<String, _, _>(
+                    "SELECT filepath FROM songs WHERE song_id = ?1",
+                    rusqlite::params![song_id],
+                    |row| row.get(0),
+                ) {
+                    println!("Matched file: {}", filepath);
+                }
+
+                // Add match quality indicator
+                let quality = if confidence > 15.0 {
+                    "High"
+                } else if confidence > 5.0 {
+                    "Medium"
+                } else {
+                    "Low"
+                };
+                println!("Match quality: {}", quality);
+            }
+        } else {
+            println!("\nNo matches found.");
+        }
+    } else {
+        eprintln!("Invalid mode specified. Use 'index' or 'match'.");
     }
-    println!(
-        "\nProcessed {} audio files, skipped {} files.",
-        audios_processed,
-        audio_files.len() - audios_processed
-    );
-    println!("All done!");
 
     Ok(())
 }
@@ -207,13 +322,26 @@ fn process_audio_file(
 
     println!("Found {} peaks.", peaks.len());
 
-    let hashes = generate_hashes(&peaks, min_time_delta, max_time_delta, target_fanout);
+    let filtered_peaks = extract_significant_peaks(
+        &spectrogram,
+        &bin_ranges,
+        PEAK_THRESHOLD_FACTOR,
+        MIN_PEAK_TIME_DISTANCE,
+        MIN_PEAK_FREQ_DISTANCE,
+    );
+
+    let hashes = generate_hashes(
+        &filtered_peaks,
+        min_time_delta,
+        max_time_delta,
+        target_fanout,
+    );
     Ok(hashes)
 }
 
 fn insert_fingerprints(
     conn: &mut Connection,
-    hashes: &Vec<(u64, usize)>,
+    hashes: &[(u64, usize)],
     song_id: i64,
 ) -> Result<(), rusqlite::Error> {
     let tx = conn.transaction()?;
@@ -276,7 +404,7 @@ fn load_and_prepare_audio(
 }
 
 fn generate_hashes(
-    peaks: &Vec<(usize, usize)>,
+    peaks: &[(usize, usize)],
     min_time_delta: usize,
     max_time_delta: usize,
     target_fanout: usize,
@@ -295,7 +423,13 @@ fn generate_hashes(
             }
 
             if time_diff >= min_time_delta && time_diff <= max_time_delta {
-                let hash = create_hash(anchor.1, target.1, time_diff);
+                let hash = match create_hash(anchor.1, target.1, time_diff) {
+                    Ok(hash) => hash,
+                    Err(e) => {
+                        eprintln!("Error creating hash: {}", e);
+                        continue;
+                    }
+                };
 
                 hashes.push((hash, anchor.0));
 
@@ -347,12 +481,12 @@ fn compute_spectrogram(
     spectrogram
 }
 
-fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
-    if target_sample_rate == orginal_sample_rate {
+fn downsample(samples: &[i16], original_sample_rate: u32, target_sample_rate: u32) -> Vec<i16> {
+    if target_sample_rate == original_sample_rate {
         return samples.to_vec();
     }
 
-    if target_sample_rate > orginal_sample_rate {
+    if target_sample_rate > original_sample_rate {
         panic!("Up-sampling is not supported");
     }
 
@@ -360,7 +494,7 @@ fn downsample(samples: &[i16], orginal_sample_rate: u32, target_sample_rate: u32
 
     let mut downsampled_samples = Vec::new();
 
-    let step = orginal_sample_rate / target_sample_rate;
+    let step = original_sample_rate / target_sample_rate;
     //println!("Step: {}", step);
 
     for sample in samples.iter().step_by(step as usize) {
@@ -388,23 +522,111 @@ fn hz_to_bin(hz: usize, sample_rate: u32, window_size: usize) -> usize {
     (hz as f64 / freq_res).round() as usize
 }
 
-fn create_hash(anchor_freq_bin: usize, target_freq_bin: usize, time_diff: usize) -> u64 {
+fn create_hash(
+    anchor_freq_bin: usize,
+    target_freq_bin: usize,
+    time_diff: usize,
+) -> Result<u64, String> {
     if anchor_freq_bin >= (1 << 22) {
-        panic!(
+        return Err(format!(
             "Anchor frequency bin exceeds the 22-bit limit: {}",
             anchor_freq_bin
-        );
+        ));
     }
     if target_freq_bin >= (1 << 10) {
-        panic!(
+        return Err(format!(
             "Target frequency bin exceeds the 10-bit limit: {}",
             target_freq_bin
-        );
+        ));
     }
     if time_diff >= (1 << 12) {
-        panic!("Time difference exceeds the 12-bit limit: {}", time_diff);
+        return Err(format!(
+            "Time difference exceeds the 12-bit limit: {}",
+            time_diff
+        ));
     }
-    ((anchor_freq_bin as u64) << 22) | ((target_freq_bin as u64) << 12) | (time_diff as u64)
+    Ok(((anchor_freq_bin as u64) << 22) | ((target_freq_bin as u64) << 12) | (time_diff as u64))
+}
+
+fn extract_significant_peaks(
+    spectrogram: &[Vec<f64>],
+    bin_ranges: &[(usize, usize)],
+    peak_threshold_factor: f64,
+    min_time_distance: usize,
+    min_freq_distance: usize,
+) -> Vec<(usize, usize)> {
+    // Returns Vec<(time_slice_idx, freq_bin_idx)>
+    if spectrogram.is_empty() {
+        return Vec::new();
+    }
+
+    let mut dynamically_thresholded_peaks: Vec<(usize, usize, f64)> = Vec::new(); // (time, freq, magnitude)
+
+    for (time_slice_index, magnitudes) in spectrogram.iter().enumerate() {
+        let mut candidates_this_slice: Vec<(usize, usize, f64)> = Vec::new(); // (time, freq_bin, mag)
+
+        for &(low_bin, high_bin) in bin_ranges {
+            if high_bin > magnitudes.len() || low_bin >= high_bin {
+                continue;
+            }
+
+            let band_slice = &magnitudes[low_bin..high_bin];
+            if let Some((max_idx_in_band, &max_magnitude_in_band)) = band_slice
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+            {
+                if max_magnitude_in_band > 1e-6 {
+                    candidates_this_slice.push((
+                        time_slice_index,
+                        low_bin + max_idx_in_band,
+                        max_magnitude_in_band,
+                    ));
+                }
+            }
+        }
+
+        if candidates_this_slice.is_empty() {
+            continue;
+        }
+
+        let average_magnitude_this_slice: f64 = candidates_this_slice
+            .iter()
+            .map(|&(_, _, mag)| mag)
+            .sum::<f64>()
+            / candidates_this_slice.len() as f64;
+
+        for &(time, freq_bin, magnitude) in &candidates_this_slice {
+            if magnitude >= average_magnitude_this_slice * peak_threshold_factor {
+                dynamically_thresholded_peaks.push((time, freq_bin, magnitude));
+            }
+        }
+    }
+
+    let mut final_peaks: Vec<(usize, usize)> = Vec::new();
+    let mut last_added_peak: Option<(usize, usize)> = None;
+
+    for (time_idx, freq_idx, _magnitude) in dynamically_thresholded_peaks {
+        if let Some((last_time, last_freq)) = last_added_peak {
+            let time_dist = time_idx.abs_diff(last_time);
+            let freq_dist = freq_idx.abs_diff(last_freq);
+
+            if time_dist >= min_time_distance || freq_dist >= min_freq_distance {
+                final_peaks.push((time_idx, freq_idx));
+                last_added_peak = Some((time_idx, freq_idx));
+            }
+        } else {
+            // Always add the very first peak encountered
+            final_peaks.push((time_idx, freq_idx));
+            last_added_peak = Some((time_idx, freq_idx));
+        }
+    }
+
+    println!(
+        "Found {} final peaks after proximity filter.",
+        final_peaks.len()
+    ); // For debugging
+    final_peaks
 }
 
 fn _spectrogram_to_image(spectrogram: &Vec<Vec<f64>>, output_path: &str) {
