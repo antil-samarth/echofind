@@ -8,6 +8,7 @@ mod audio;
 mod config;
 mod db;
 mod hashing;
+mod matching;
 
 use audio::{
     compute_spectrogram, extract_significant_peaks, hamming_window, hz_to_bin,
@@ -155,34 +156,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let histogram = query_matches(&conn, &snippet_hashes)?;
 
-        println!("\nAnalyzing matches...");
-        let mut matches: Vec<_> = histogram
-            .iter()
-            .map(|(&song_id, offsets)| {
-                let max_count_for_song = offsets.values().max().cloned().unwrap_or(0);
-                (song_id, max_count_for_song)
-            })
-            .filter(|&(_, count)| count > 2)
-            .collect();
+        let matches_with_confidence = matching::find_best_matches(&histogram, hash_count as usize);
 
-        matches.sort_by(|a, b| b.1.cmp(&a.1));
-
-        if !matches.is_empty() {
+        if !matches_with_confidence.is_empty() {
             println!("\nTop matches found:");
 
-            for (i, &(song_id, match_count)) in matches.iter().take(3).enumerate() {
+            // The tuple now contains (song_id, match_count, confidence)
+            for (i, &(song_id, match_count, confidence)) in
+                matches_with_confidence.iter().take(3).enumerate()
+            {
                 println!("\nMatch #{}", i + 1);
                 println!("Song ID: {}", song_id);
                 println!("Match strength: {} matching points", match_count);
-
-                let confidence = (match_count as f64 / hash_count as f64) * 100.0;
-                let confidence = confidence.min(100.0);
-                println!("Confidence: {:.1}%", confidence);
+                println!("Confidence: {:.1}%", confidence); // Already calculated!
 
                 let filepath = get_song_filepath(&conn, song_id)?;
                 println!("Matched Filepath: {}", filepath);
 
                 let quality = if confidence > 15.0 {
+                    // Use confidence for quality
                     "High"
                 } else if confidence > 5.0 {
                     "Medium"
