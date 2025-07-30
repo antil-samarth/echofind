@@ -94,8 +94,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 WINDOW_SIZE,
                 HOP_SIZE,
                 TARGET_SAMPLE_RATE,
-                MIN_TIME_DELTA,
                 MAX_TIME_DELTA,
+                MIN_TIME_DELTA,
                 TARGET_FANOUT,
             ) {
                 Ok(hashes) => {
