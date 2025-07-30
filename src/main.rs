@@ -16,21 +16,21 @@ use audio::{
 };
 use config::{
     FREQ_BANDS, HOP_SIZE, MAX_TIME_DELTA, MIN_PEAK_FREQ_DISTANCE, MIN_PEAK_TIME_DISTANCE,
-    MIN_TIME_DELTA, PEAK_THRESHOLD_FACTOR, TARGET_FANOUT, TARGET_SAMPLE_RATE, WINDOW_SIZE,
+    MIN_TIME_DELTA, PEAK_THRESHOLD_FACTOR, TARGET_SAMPLE_RATE, WINDOW_SIZE,
 };
 use db::{
     check_song_exists, get_song_filepath, insert_fingerprints, insert_song_record, query_matches,
     setup_database,
 };
-use hashing::generate_hashes;
+use hashing::generate_constellation_hashes;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // constants
     const DB_PATH: &str = "src/media/audio_fingerprints.db";
     const AUDIO_DIR: &str = "src/media/wav/";
-    const INPUT_FILE: &str = "src/media/recording/recording1.wav";
+    const INPUT_FILE: &str = "src/media/recording/recording.wav";
 
-    const MODE: &str = "train"; // "test" or "train"
+    const MODE: &str = "test"; // "test" or "train"
 
     if MODE == "train" {
         let mut conn = setup_database(DB_PATH)?;
@@ -97,7 +97,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 TARGET_SAMPLE_RATE,
                 MAX_TIME_DELTA,
                 MIN_TIME_DELTA,
-                TARGET_FANOUT,
             ) {
                 Ok(hashes) => {
                     println!("Generated {} hashes for song ID: {}", hashes.len(), song_id);
@@ -143,7 +142,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             TARGET_SAMPLE_RATE,
             MAX_TIME_DELTA,
             MIN_TIME_DELTA,
-            TARGET_FANOUT,
         )?;
         if snippet_hashes.is_empty() {
             println!("No hashes generated for the test file.");
@@ -201,7 +199,6 @@ fn process_audio_file(
     target_sample_rate: u32,
     max_time_delta: usize,
     min_time_delta: usize,
-    target_fanout: usize,
 ) -> Result<Vec<(u64, usize)>, Box<dyn std::error::Error>> {
     println!("\nLoading and preparing audio file: {}", filepath);
     let samples_vec = load_and_prepare_audio(filepath, target_sample_rate)?;
@@ -253,11 +250,10 @@ fn process_audio_file(
         PEAK_THRESHOLD_FACTOR,
     );
 
-    let hashes = generate_hashes(
+    let hashes = generate_constellation_hashes(
         &filtered_peaks,
-        max_time_delta,
         min_time_delta,
-        target_fanout,
+        max_time_delta,
     );
     Ok(hashes)
 }
