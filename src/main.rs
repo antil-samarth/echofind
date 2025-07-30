@@ -2,7 +2,7 @@ use hound;
 use image;
 use rusqlite::Connection;
 use rustfft::FftPlanner;
-use std::{fs::read_dir, usize::MIN};
+use std::fs::read_dir;
 
 mod audio;
 mod config;
@@ -13,7 +13,10 @@ use audio::{
     compute_spectrogram, extract_significant_peaks, hamming_window, hz_to_bin,
     load_and_prepare_audio,
 };
-use config::{FREQ_BANDS, HOP_SIZE, MAX_TIME_DELTA, MIN_PEAK_FREQ_DISTANCE, MIN_PEAK_TIME_DISTANCE, MIN_TIME_DELTA, PEAK_THRESHOLD_FACTOR, TARGET_FANOUT, TARGET_SAMPLE_RATE, WINDOW_SIZE};
+use config::{
+    FREQ_BANDS, HOP_SIZE, MAX_TIME_DELTA, MIN_PEAK_FREQ_DISTANCE, MIN_PEAK_TIME_DISTANCE,
+    MIN_TIME_DELTA, PEAK_THRESHOLD_FACTOR, TARGET_FANOUT, TARGET_SAMPLE_RATE, WINDOW_SIZE,
+};
 use db::{
     check_song_exists, get_song_filepath, insert_fingerprints, insert_song_record, query_matches,
     setup_database,
@@ -85,7 +88,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             };
             println!("Using song_id: {}", song_id);
 
-            let hashes = match process_audio_file(&filepath, FREQ_BANDS, WINDOW_SIZE, HOP_SIZE, TARGET_SAMPLE_RATE, MIN_TIME_DELTA, MAX_TIME_DELTA, TARGET_FANOUT) {
+            let hashes = match process_audio_file(
+                &filepath,
+                FREQ_BANDS,
+                WINDOW_SIZE,
+                HOP_SIZE,
+                TARGET_SAMPLE_RATE,
+                MIN_TIME_DELTA,
+                MAX_TIME_DELTA,
+                TARGET_FANOUT,
+            ) {
                 Ok(hashes) => {
                     println!("Generated {} hashes for song ID: {}", hashes.len(), song_id);
                     hashes
@@ -122,7 +134,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else if MODE == "test" {
         println!("\n ------ TESTING ------ ");
 
-        let snippet_hashes = process_audio_file(INPUT_FILE, FREQ_BANDS, WINDOW_SIZE, HOP_SIZE, TARGET_SAMPLE_RATE, MAX_TIME_DELTA, MIN_TIME_DELTA, TARGET_FANOUT)?;
+        let snippet_hashes = process_audio_file(
+            INPUT_FILE,
+            FREQ_BANDS,
+            WINDOW_SIZE,
+            HOP_SIZE,
+            TARGET_SAMPLE_RATE,
+            MAX_TIME_DELTA,
+            MIN_TIME_DELTA,
+            TARGET_FANOUT,
+        )?;
         if snippet_hashes.is_empty() {
             println!("No hashes generated for the test file.");
             return Ok(());
@@ -196,11 +217,17 @@ fn process_audio_file(
     let mut planner = FftPlanner::new();
     let fft = planner.plan_fft_forward(window_size);
 
-    let spectrogram = compute_spectrogram(samples_vec, window_coefficients, fft, hop_size, window_size);
+    let spectrogram =
+        compute_spectrogram(samples_vec, window_coefficients, fft, hop_size, window_size);
 
     let bin_ranges = freq_bands
         .windows(2)
-        .map(|band| (hz_to_bin(band[0], window_size, target_sample_rate), hz_to_bin(band[1], window_size, target_sample_rate)))
+        .map(|band| {
+            (
+                hz_to_bin(band[0], window_size, target_sample_rate),
+                hz_to_bin(band[1], window_size, target_sample_rate),
+            )
+        })
         .collect::<Vec<_>>();
 
     /* let bin_ranges: Vec<(usize, usize)> = vec![(0, 5), (5, 80), (80, 160), (160, 320), (320, 640), (640, 1280), (1280, 4096)]; */
@@ -226,9 +253,20 @@ fn process_audio_file(
 
     println!("Found {} peaks.", peaks.len());
 
-    let filtered_peaks = extract_significant_peaks(&spectrogram, &bin_ranges, MIN_PEAK_FREQ_DISTANCE, MIN_PEAK_TIME_DISTANCE, PEAK_THRESHOLD_FACTOR);
+    let filtered_peaks = extract_significant_peaks(
+        &spectrogram,
+        &bin_ranges,
+        MIN_PEAK_FREQ_DISTANCE,
+        MIN_PEAK_TIME_DISTANCE,
+        PEAK_THRESHOLD_FACTOR,
+    );
 
-    let hashes = generate_hashes(&filtered_peaks, max_time_delta, min_time_delta, target_fanout);
+    let hashes = generate_hashes(
+        &filtered_peaks,
+        max_time_delta,
+        min_time_delta,
+        target_fanout,
+    );
     Ok(hashes)
 }
 

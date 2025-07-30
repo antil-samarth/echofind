@@ -1,4 +1,9 @@
-pub fn generate_hashes(peaks: &[(usize, usize)], max_time_delta: usize, min_time_delta: usize, target_fanout: usize) -> Vec<(u64, usize)> {
+pub fn generate_hashes(
+    peaks: &[(usize, usize)],
+    max_time_delta: usize,
+    min_time_delta: usize,
+    target_fanout: usize,
+) -> Vec<(u64, usize)> {
     let mut hashes: Vec<(u64, usize)> = Vec::new();
 
     for i in 0..peaks.len() {

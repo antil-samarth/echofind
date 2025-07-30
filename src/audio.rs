@@ -1,7 +1,10 @@
 use rustfft::{Fft, num_complex::Complex};
 use std::{cmp::Ordering, f64::consts::PI};
 
-pub fn load_and_prepare_audio(filepath: &str, target_sample_rate: u32) -> Result<Vec<i16>, Box<dyn std::error::Error>> {
+pub fn load_and_prepare_audio(
+    filepath: &str,
+    target_sample_rate: u32,
+) -> Result<Vec<i16>, Box<dyn std::error::Error>> {
     let mut reader = hound::WavReader::open(filepath)?;
     let spec = reader.spec();
     let sample_rate = spec.sample_rate;
