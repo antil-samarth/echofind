@@ -7,7 +7,7 @@ A project implementing the core principles of audio fingerprinting and recogniti
 
 ## Motivation & Background
 
-This project was inspired by the impressive "Now Playing" feature on my Google Pixel phone. Its ability to quickly and accurately identify songs playing in the background, seemingly offline and without needing long samples, sparked curiosity about the underlying technology.
+This project was inspired by the impressive "Now Playing" feature on my Google Pixel phone. Its ability to quickly and accurately identify songs playing in the background, seemingly offline, and without needing long samples, sparked curiosity about the underlying technology.
 
 The primary goals for building EchoFind are:
 
@@ -15,18 +15,16 @@ The primary goals for building EchoFind are:
 2.  **Showcase Language Versatility:** To dive into **Rust**, a modern, performant systems programming language known for its safety, speed, and growing ecosystem. This project serves as a practical application to learn and demonstrate proficiency in Rust.
 3.  **Utilize Widely-Used Technologies:** To gain hands-on experience with **SQLite3**, a lightweight, embedded, and extensively used database engine, managing the storage and retrieval of audio fingerprints.
 
-## Features (Current & Planned)
+## Features
 
 *   **Audio Loading:** Reads standard WAV audio files.
-*   **Signal Processing:** Converts stereo to mono, downsamples audio for efficiency.
+*   **Signal Processing:** Converts stereo to mono and downsamples audio for efficiency.
 *   **Spectrogram Generation:** Computes the Short-Time Fourier Transform (STFT) using `rustfft` to analyze frequency content over time.
 *   **Peak Finding:** Identifies prominent time-frequency peaks in the spectrogram, which serve as audio landmarks.
-*   **Fingerprint Hashing:** Implements the anchor/target hashing strategy to create robust fingerprint hashes based on pairs of peaks.
-    *   `(anchor_freq, target_freq, time_delta)` encoded into a compact `u64` hash.
-*   **Visualization:** Generates images of the spectrogram and identified peaks using the `image` crate.
-*   **TBD**
-*   **Database Storage (Phase 2):** Storing generated fingerprints `(hash, time_offset, song_id)` in an SQLite database using `rusqlite`.
-*   **Song Matching (Phase 3):** Comparing fingerprints from an audio snippet against the database using a time offset histogram method to identify the most likely match.
+*   **Constellation Hashing:** Implements a robust hashing strategy based on "constellations" of an anchor peak and multiple target peaks.
+*   **Database Storage:** Stores generated fingerprints in an SQLite database using `rusqlite`.
+*   **Song Matching:** Compares fingerprints from an audio snippet against the database to find the most likely match.
+*   **Command-Line Interface:** A user-friendly CLI built with `clap` for training the database and matching songs.
 
 ## Technology Stack
 
@@ -35,41 +33,63 @@ The primary goals for building EchoFind are:
 *   **Core Crates:**
     *   `hound`: For reading WAV audio files.
     *   `rustfft`: For Fast Fourier Transform calculations.
-    *   `image`: For spectrogram visualization.
-    *   `rusqlite`: For SQLite database interaction (to be added in Phase 2).
+    *   `rusqlite`: For SQLite database interaction.
+    *   `clap`: For command-line argument parsing.
 
 ## Algorithm Overview
 
 1.  **Preprocessing:** Audio is loaded, converted to mono, and downsampled (e.g., to 8192 Hz) to reduce computational load while retaining essential frequencies.
-2.  **STFT:** The audio is divided into short, overlapping windows. The Fast Fourier Transform (FFT) is applied to each window (after applying a Hamming window function) to get the frequency spectrum for that short time segment. This creates a spectrogram (time vs. frequency vs. intensity).
-3.  **Peak Finding:** For each time slice in the spectrogram, the algorithm identifies frequency peaks with the highest energy within predefined frequency bands. These `(time, frequency)` points form a "constellation map" of the most robust audio features.
-4.  **Hashing:** Pairs of nearby peaks (an "anchor" peak and a subsequent "target" peak within a target zone) are combined. A hash value is generated encoding the anchor frequency, target frequency, and the time difference between them.
-5.  **Storage (Phase 2):** Each generated `(hash, anchor_time_offset, song_id)` tuple is stored in an indexed SQLite database. (Phase 2 Target)
-6.  **Matching (Phase 3):** Generate hashes for an unknown audio snippet and query the database. Identify candidate songs based on hash matches. The final identification relies on finding statistically significant alignment in the `time_offset` values between the snippet and database songs (using a histogram approach). (Phase 3 Target) 
+2.  **STFT:** The audio is divided into short, overlapping windows. The Fast Fourier Transform (FFT) is applied to each window to get the frequency spectrum for that time segment. This creates a spectrogram.
+3.  **Peak Finding:** For each time slice in the spectrogram, the algorithm identifies frequency peaks with the highest energy within predefined frequency bands. These `(time, frequency)` points form a "constellation map."
+4.  **Constellation Hashing:** For each "anchor" peak, the algorithm finds a set of subsequent "target" peaks within a defined time window. A hash is then generated that encodes the anchor's frequency and the frequencies and time deltas of the targets. This creates a robust and specific fingerprint.
+5.  **Storage:** Each generated `(hash, anchor_time_offset, song_id)` tuple is stored in an indexed SQLite database.
+6.  **Matching:** Hashes are generated for an unknown audio snippet and queried against the database. The final identification relies on finding a statistically significant number of matching hashes with consistent time offsets.
 
-### Database Setup (Phase 2 onwards)
+## Usage
 
-## Project Structure (Simplified)
+### Training
+
+To add songs to the fingerprint database, use the `train` command:
+
+```bash
+cargo run -- train --audio-dir path/to/your/audio
+```
+
+This will scan the specified directory for `.wav` files, generate fingerprints for them, and store them in the database.
+
+### Matching
+
+To identify a song from a recording, use the `test` command:
+
+```bash
+cargo run -- test --input-file path/to/your/recording.wav
+```
+
+This will generate fingerprints for the input file and compare them against the database to find a match.
+
+## Project Structure
 
 ```
 echofind/
-├── mp3_to_wav.bat   # Script to convert MP3 audio files to WAV using `ffmpeg` made with the help of Claude (Windows)
+├── mp3_to_wav.bat   # Script to convert MP3 audio files to WAV
 ├── Cargo.toml       # Project manifest and dependencies
 ├── README.md        # This file
 ├── src/
-│   ├── main.rs      # Main application logic (entry point)
-│   ├── media/       # Sample audio files, generated images
-│   └── [other .rs files for modules - planned]
-├── target/          # Build artifacts (generated by cargo)
-└── [database.sqlite] # SQLite database file (generated on first run/add)
+│   ├── main.rs      # Main application logic and CLI
+│   ├── audio.rs     # Audio processing functions
+│   ├── config.rs    # Configuration constants
+│   ├── db.rs        # Database interaction functions
+│   ├── hashing.rs   # Fingerprint hashing functions
+│   ├── matching.rs  # Song matching logic
+│   └── media/       # Sample audio files and database
+└── target/          # Build artifacts
 ```
 
 ## Future Enhancements
 
 *   Implement real-time microphone input using `cpal`.
-*   Build the command-line interface using `clap`.
-*   Implement database storage and retrieval (`rusqlite`).
 *   Support for more audio formats (e.g., using `symphonia`).
 *   Explore more advanced/robust peak finding algorithms.
 *   Performance optimizations for fingerprinting and matching.
 *   Add basic song metadata handling (reading tags, storing title/artist).
+*   Add a graphical user interface (GUI).

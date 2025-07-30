@@ -1,66 +1,98 @@
-pub fn generate_hashes(
+use crate::config::{FUZ_FACTOR, NUM_TARGETS_IN_HASH};
+
+pub fn generate_constellation_hashes(
     peaks: &[(usize, usize)],
-    max_time_delta: usize,
     min_time_delta: usize,
-    target_fanout: usize,
+    max_time_delta: usize,
 ) -> Vec<(u64, usize)> {
+    println!(
+        "Generating constellation hashes (N={} targets)...",
+        NUM_TARGETS_IN_HASH
+    );
     let mut hashes: Vec<(u64, usize)> = Vec::new();
 
     for i in 0..peaks.len() {
-        let anchor = peaks[i];
-        let mut targets_count = 0;
+        let anchor = peaks[i]; // (anchor_time, anchor_freq)
+        let mut targets_for_this_anchor: Vec<(usize, usize)> = Vec::new(); // (target_freq, time_delta)
 
         for j in (i + 1)..peaks.len() {
-            let target = peaks[j];
-            let time_diff = target.0 - anchor.0;
-            if time_diff > max_time_delta {
+            let target = peaks[j]; // (target_time, target_freq)
+            let time_delta = target.0 - anchor.0;
+
+            if time_delta > max_time_delta {
                 break;
             }
 
-            if time_diff >= min_time_delta && time_diff <= max_time_delta {
-                let hash = match compute_hash(anchor.1, target.1, time_diff) {
-                    Ok(hash) => hash,
-                    Err(e) => {
-                        eprintln!("Error creating hash: {}", e);
-                        continue;
-                    }
-                };
-
-                hashes.push((hash, anchor.0));
-
-                targets_count += 1;
-
-                if targets_count >= target_fanout {
+            if time_delta >= min_time_delta {
+                targets_for_this_anchor.push((target.1, time_delta)); // (freq_bin, delta)
+                if targets_for_this_anchor.len() == NUM_TARGETS_IN_HASH {
                     break;
                 }
             }
         }
+
+        if targets_for_this_anchor.len() == NUM_TARGETS_IN_HASH {
+            let hash = compute_constellation_hash(anchor.1, &targets_for_this_anchor);
+            hashes.push((hash, anchor.0)); // Store hash and the anchor's time
+        }
     }
+
+    println!("Found {} initial constellations.", hashes.len());
+
+    // Sort and remove duplicate hashes to reduce database size and improve matching speed.
+    hashes.sort_unstable_by_key(|k| k.0);
+    hashes.dedup_by_key(|k| k.0);
+
+    println!("Found {} unique constellations.", hashes.len());
+
     hashes
 }
 
-fn compute_hash(
-    anchor_freq_bin: usize,
-    target_freq_bin: usize,
-    time_diff: usize,
-) -> Result<u64, String> {
-    if anchor_freq_bin >= (1 << 22) {
-        return Err(format!(
-            "Anchor frequency bin exceeds the 22-bit limit: {}",
-            anchor_freq_bin
-        ));
+fn compute_constellation_hash(
+    anchor_freq: usize,
+    targets: &[(usize, usize)], // (target_freq, time_delta)
+) -> u64 {
+    // --- Bit Packing Configuration ---
+    // We pack 1 anchor_freq + N target_freqs + N time_deltas into a single u64.
+    //
+    // - Max freq_bin is 511 (from WINDOW_SIZE/2), which requires 9 bits (2^9 = 512).
+    //   We apply a FUZ_FACTOR to reduce this, needing fewer bits.
+    // - Max time_delta is configured (e.g., 45), which requires 6 bits (2^6 = 64).
+    //
+    // With FUZ_FACTOR=4, max fuzzed freq is 511/4 = 127, which needs 7 bits (2^7 = 128).
+    const FREQ_BITS: u32 = 7;
+    const DELTA_BITS: u32 = 6;
+
+    // Verify that the total bits will fit in a u64.
+    // For N=4: (1 anchor + 4 targets) * 7 bits_freq + 4 targets * 6 bits_delta = 35 + 24 = 59 bits.
+    // This fits comfortably within a u64.
+    const _: () = assert!(
+        (1 + NUM_TARGETS_IN_HASH) as u32 * FREQ_BITS + (NUM_TARGETS_IN_HASH as u32 * DELTA_BITS)
+            < 64,
+        "Bit packing configuration exceeds u64 size"
+    );
+
+
+    let mut hash: u64 = 0;
+    let mut current_shift = 0;
+
+    // Pack the time deltas first
+    for i in 0..NUM_TARGETS_IN_HASH {
+        let delta = targets[i].1 as u64; // time_delta
+        hash |= delta << current_shift;
+        current_shift += DELTA_BITS;
     }
-    if target_freq_bin >= (1 << 10) {
-        return Err(format!(
-            "Target frequency bin exceeds the 10-bit limit: {}",
-            target_freq_bin
-        ));
+
+    // Pack the target frequencies
+    for i in 0..NUM_TARGETS_IN_HASH {
+        let fuzzed_freq = (targets[i].0 / FUZ_FACTOR) as u64; // target_freq
+        hash |= fuzzed_freq << current_shift;
+        current_shift += FREQ_BITS;
     }
-    if time_diff >= (1 << 12) {
-        return Err(format!(
-            "Time difference exceeds the 12-bit limit: {}",
-            time_diff
-        ));
-    }
-    Ok(((anchor_freq_bin as u64) << 22) | ((target_freq_bin as u64) << 12) | (time_diff as u64))
+
+    // Pack the anchor frequency
+    let fuzzed_anchor_freq = (anchor_freq / FUZ_FACTOR) as u64;
+    hash |= fuzzed_anchor_freq << current_shift;
+
+    hash
 }
