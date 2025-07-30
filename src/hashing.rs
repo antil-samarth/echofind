@@ -1,4 +1,4 @@
-const NUM_TARGETS_IN_HASH: usize = 4;
+use crate::config::{FUZ_FACTOR, NUM_TARGETS_IN_HASH};
 
 pub fn generate_constellation_hashes(
     peaks: &[(usize, usize)],
@@ -39,9 +39,12 @@ pub fn generate_constellation_hashes(
 
     println!("Found {} initial constellations.", hashes.len());
 
+    // Sort and remove duplicate hashes to reduce database size and improve matching speed.
     hashes.sort_unstable_by_key(|k| k.0);
     hashes.dedup_by_key(|k| k.0);
-    
+
+    println!("Found {} unique constellations.", hashes.len());
+
     hashes
 }
 
@@ -50,31 +53,44 @@ fn compute_constellation_hash(
     targets: &[(usize, usize)], // (target_freq, time_delta)
 ) -> u64 {
     // --- Bit Packing Configuration ---
-    // 1 anchor_freq + N target_freqs + N time_deltas into 64 bits.
-    // - Max freq_bin - 511 ( WINDOW_SIZE/2 ), 9 bits (2^9 = 512).
-    // - Max time_delta - 6 bits (2^6 = 64).
-    const FUZ_FACTOR: usize = 4;
+    // We pack 1 anchor_freq + N target_freqs + N time_deltas into a single u64.
+    //
+    // - Max freq_bin is 511 (from WINDOW_SIZE/2), which requires 9 bits (2^9 = 512).
+    //   We apply a FUZ_FACTOR to reduce this, needing fewer bits.
+    // - Max time_delta is configured (e.g., 45), which requires 6 bits (2^6 = 64).
+    //
+    // With FUZ_FACTOR=4, max fuzzed freq is 511/4 = 127, which needs 7 bits (2^7 = 128).
     const FREQ_BITS: u32 = 7;
     const DELTA_BITS: u32 = 6;
 
-    // Total bits = (1 anchor + N targets) * FREQ_BITS + N * DELTA_BITS
-    // For N=4: (1+4)*7 + 4*6 = 35 + 24 = 59 bits. -> u64!
+    // Verify that the total bits will fit in a u64.
+    // For N=4: (1 anchor + 4 targets) * 7 bits_freq + 4 targets * 6 bits_delta = 35 + 24 = 59 bits.
+    // This fits comfortably within a u64.
+    const _: () = assert!(
+        (1 + NUM_TARGETS_IN_HASH) as u32 * FREQ_BITS + (NUM_TARGETS_IN_HASH as u32 * DELTA_BITS)
+            < 64,
+        "Bit packing configuration exceeds u64 size"
+    );
+
 
     let mut hash: u64 = 0;
     let mut current_shift = 0;
 
+    // Pack the time deltas first
     for i in 0..NUM_TARGETS_IN_HASH {
         let delta = targets[i].1 as u64; // time_delta
         hash |= delta << current_shift;
         current_shift += DELTA_BITS;
     }
 
+    // Pack the target frequencies
     for i in 0..NUM_TARGETS_IN_HASH {
         let fuzzed_freq = (targets[i].0 / FUZ_FACTOR) as u64; // target_freq
         hash |= fuzzed_freq << current_shift;
         current_shift += FREQ_BITS;
     }
 
+    // Pack the anchor frequency
     let fuzzed_anchor_freq = (anchor_freq / FUZ_FACTOR) as u64;
     hash |= fuzzed_anchor_freq << current_shift;
 
